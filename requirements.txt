@@ -1,0 +1,3 @@
+openai-whisper
+gradio>=4.44
+reportlab
