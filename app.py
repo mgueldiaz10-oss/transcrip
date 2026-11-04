@@ -91,7 +91,7 @@ def build_pdf(segments, title, source_name, pdf_path):
     doc.build(story, onFirstPage=footer, onLaterPages=footer)
 
 
-def transcribe(file_path, title, model_name, language, progress=gr.Progress()):
+def transcribe(file_path, title, model_name, language, task="transcribe", progress=gr.Progress()):
     if not file_path:
         raise gr.Error("Primero sube un archivo de audio.")
 
@@ -102,12 +102,14 @@ def transcribe(file_path, title, model_name, language, progress=gr.Progress()):
     progress(0.05, desc=f"Cargando modelo Whisper ({model_name})...")
     model = get_model(model_name)
 
-    progress(0.15, desc="Transcribiendo... (puede tardar varios minutos)")
+    action_label = "Traduciendo a inglés" if task == "translate" else "Transcribiendo"
+    progress(0.15, desc=f"{action_label}... (puede tardar varios minutos)")
     start = time.time()
     # Whisper lee directamente m4a/mp3/wav/etc. mediante ffmpeg (ya incluido en Colab).
     result = model.transcribe(
         file_path,
         language=None if language == "auto" else language,
+        task=task,
         fp16=(DEVICE == "cuda"),
         verbose=False,
     )
@@ -127,8 +129,10 @@ def transcribe(file_path, title, model_name, language, progress=gr.Progress()):
     preview = result["text"].strip()
     if len(preview) > 3000:
         preview = preview[:3000] + "\n[... vista previa recortada; el texto completo está en el PDF ...]"
+    detected_lang = result.get("language", language)
+    mode_info = " (traducido a inglés)" if task == "translate" else ""
     status = (
-        f"✅ Listo en {elapsed / 60:.1f} min. Idioma: **{result.get('language', language)}**. "
+        f"✅ Listo en {elapsed / 60:.1f} min. Idioma detectado/origen: **{detected_lang}**{mode_info}. "
         "Descarga tus archivos abajo."
     )
     return pdf_path, txt_path, preview, status
@@ -141,14 +145,36 @@ def build_ui():
             with gr.Column():
                 audio_in = gr.File(label="Audio del seminario", file_types=AUDIO_TYPES, type="filepath")
                 title_in = gr.Textbox(label="Título del documento", value="Transcripción de seminario")
+                with gr.Row():
+                    lang_in = gr.Dropdown(
+                        [
+                            ("Español", "es"),
+                            ("English", "en"),
+                            ("Detectar automáticamente", "auto"),
+                            ("Français", "fr"),
+                            ("Deutsch", "de"),
+                            ("Português", "pt"),
+                            ("Italiano", "it"),
+                        ],
+                        value="es",
+                        label="Idioma del audio",
+                        info="Selecciona English o detección automática si el seminario está en inglés.",
+                    )
+                    task_in = gr.Radio(
+                        [
+                            ("Transcribir (mismo idioma)", "transcribe"),
+                            ("Traducir a inglés", "translate"),
+                        ],
+                        value="transcribe",
+                        label="Acción",
+                        info="Transcribir mantiene el idioma hablado; Traducir genera el texto en inglés.",
+                    )
                 with gr.Accordion("Opciones avanzadas", open=False):
                     model_in = gr.Dropdown(
-                        ["small", "medium", "large-v3"], value="medium", label="Modelo Whisper",
-                        info="medium: buen equilibrio. large-v3: más preciso pero más lento.",
-                    )
-                    lang_in = gr.Dropdown(
-                        [("Español", "es"), ("English", "en"), ("Detectar automáticamente", "auto")],
-                        value="es", label="Idioma del audio",
+                        ["small", "medium", "large-v3"],
+                        value="medium",
+                        label="Modelo Whisper",
+                        info="medium: buen equilibrio. large-v3: máxima precisión técnica.",
                     )
                 run_btn = gr.Button("Transcribir", variant="primary")
             with gr.Column():
@@ -159,7 +185,7 @@ def build_ui():
 
         run_btn.click(
             transcribe,
-            inputs=[audio_in, title_in, model_in, lang_in],
+            inputs=[audio_in, title_in, model_in, lang_in, task_in],
             outputs=[pdf_out, txt_out, preview_out, status_out],
         )
     return demo
