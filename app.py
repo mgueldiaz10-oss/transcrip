@@ -373,83 +373,9 @@ def call_llm_for_reconstruction(
         "Genera ahora la Ficha Técnica, la Reconstrucción Integral, el Resumen Ejecutivo y el Análisis de la Sesión de Preguntas (Q&A) siguiendo tus instrucciones."
     )
 
-    if "Gemini" in model_choice:
-        from google import genai
-
-        api_key = (api_key_override or "").strip() or os.environ.get("GEMINI_API_KEY", "").strip()
-        if not api_key:
-            raise gr.Error(
-                "Se requiere una API Key de Gemini. Agrégala en Google Colab Secrets (llave 🔑 -> GEMINI_API_KEY) "
-                "o pégala en 'Opciones avanzadas'."
-            )
-
-        client = genai.Client(api_key=api_key)
-        # Lista ordenada por estabilidad: 1.5-flash y 2.0-flash no sufren la saturación de 3.8
-        candidates = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-3.8-flash", "gemini-2.5-flash-lite"]
-        if "3.8" in model_choice:
-            candidates = ["gemini-3.8-flash", "gemini-1.5-flash", "gemini-2.0-flash"]
-        elif "2.0" in model_choice:
-            candidates = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-3.8-flash"]
-        elif "1.5" in model_choice:
-            candidates = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-3.8-flash"]
-
-        candidates = list(dict.fromkeys(candidates))
-
-        last_err = None
-        for mod in candidates:
-            try:
-                if progress:
-                    progress(0.4, desc=f"Reconstruyendo con {mod}...")
-                response = client.models.generate_content(
-                    model=mod,
-                    contents=[RECONSTRUCTION_PROMPT + "\n\n" + user_prompt],
-                )
-                if response.text and response.text.strip():
-                    return response.text.strip(), f"Google {mod}"
-            except Exception as e:
-                last_err = e
-                err_str = str(e).lower()
-                # Si es 503 (alta demanda), 404 (retirado) o 429, probamos inmediatamente con el siguiente candidato
-                if any(c in err_str for c in ["503", "unavailable", "high demand", "404", "not_found", "no longer available", "429", "resource_exhausted"]):
-                    print(f"Aviso: {mod} no respondió ({err_str[:60]}...). Probando siguiente modelo...")
-                    time.sleep(1.5)
-                    continue
-                raise e
-        raise last_err
-
-    elif "Groq" in model_choice or "Llama" in model_choice:
-        from groq import Groq
-
-        api_key = (api_key_override or "").strip() or os.environ.get("GROQ_API_KEY", "").strip()
-        if not api_key:
-            raise gr.Error(
-                "Para usar Groq (Llama 3.3 70B), ingresa tu API Key gratuita de Groq. "
-                "Puedes obtener una gratis en 10 segundos en https://console.groq.com/keys "
-                "y pegarla aquí o guardarla en Colab Secrets como GROQ_API_KEY."
-            )
-
-        client = Groq(api_key=api_key)
-        for groq_model in ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]:
-            try:
-                if progress:
-                    progress(0.4, desc=f"Reconstruyendo con {groq_model} (Groq)...")
-                response = client.chat.completions.create(
-                    model=groq_model,
-                    messages=[
-                        {"role": "system", "content": RECONSTRUCTION_PROMPT},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    temperature=0.3,
-                )
-                return response.choices[0].message.content or "", f"Meta ({groq_model} vía Groq)"
-            except Exception as e:
-                print(f"Aviso Groq {groq_model}: {e}")
-                continue
-        raise gr.Error("No se pudo completar con Groq.")
-
-    elif "Local" in model_choice or "Qwen" in model_choice:
+    if "Local" in model_choice or "Qwen" in model_choice:
         if progress:
-            progress(0.2, desc="Cargando modelo local Qwen 2.5 en GPU T4 (sin APIs)...")
+            progress(0.15, desc="Cargando modelo local Qwen 2.5 3B en GPU (sin APIs externas)...")
         from transformers import AutoModelForCausalLM, AutoTokenizer
         import torch
 
@@ -469,7 +395,7 @@ def call_llm_for_reconstruction(
         model_inputs = tokenizer([text_input], return_tensors="pt").to(model.device)
 
         if progress:
-            progress(0.5, desc="Generando informe en GPU local...")
+            progress(0.45, desc="Generando reconstrucción e informe en tu GPU local...")
 
         generated_ids = model.generate(
             **model_inputs,
@@ -488,6 +414,70 @@ def call_llm_for_reconstruction(
             torch.cuda.empty_cache()
 
         return response_text, "Qwen 2.5 3B (Local en GPU T4)"
+
+    elif "Groq" in model_choice or "Llama" in model_choice:
+        from groq import Groq
+
+        api_key = (api_key_override or "").strip() or os.environ.get("GROQ_API_KEY", "").strip()
+        if not api_key:
+            raise gr.Error(
+                "Para usar Groq (Llama 3.3 70B), pega tu API Key gratuita de Groq aquí. "
+                "Puedes obtenerla en 10 segundos gratis en https://console.groq.com/keys "
+                "(o usa la opción 'Modelo Local en GPU' que no requiere ninguna clave)."
+            )
+
+        client = Groq(api_key=api_key)
+        for groq_model in ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]:
+            try:
+                if progress:
+                    progress(0.4, desc=f"Reconstruyendo con {groq_model} en Groq...")
+                response = client.chat.completions.create(
+                    model=groq_model,
+                    messages=[
+                        {"role": "system", "content": RECONSTRUCTION_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.3,
+                )
+                return response.choices[0].message.content or "", f"Meta ({groq_model} vía Groq)"
+            except Exception as e:
+                print(f"Aviso Groq {groq_model}: {e}")
+                continue
+        raise gr.Error("No se pudo completar con Groq.")
+
+    elif "Gemini" in model_choice:
+        from google import genai
+
+        api_key = (api_key_override or "").strip() or os.environ.get("GEMINI_API_KEY", "").strip()
+        if not api_key:
+            raise gr.Error(
+                "Se requiere una API Key de Gemini. Agrégala en Colab Secrets (GEMINI_API_KEY) "
+                "o pégala en el campo de texto."
+            )
+
+        client = genai.Client(api_key=api_key)
+        last_err = None
+        for attempt in range(3):
+            try:
+                if progress:
+                    progress(0.3 + attempt * 0.15, desc=f"Conectando con Gemini 3.8 Flash (intento {attempt+1}/3)...")
+                response = client.models.generate_content(
+                    model="gemini-3.8-flash",
+                    contents=[RECONSTRUCTION_PROMPT + "\n\n" + user_prompt],
+                )
+                if response.text and response.text.strip():
+                    return response.text.strip(), "Google Gemini 3.8 Flash"
+            except Exception as e:
+                last_err = e
+                err_str = str(e).lower()
+                if "503" in err_str or "unavailable" in err_str or "high demand" in err_str:
+                    wait_sec = 3 * (attempt + 1)
+                    print(f"Gemini 3.8 saturado (503). Reintentando en {wait_sec}s...")
+                    time.sleep(wait_sec)
+                    continue
+                else:
+                    raise e
+        raise gr.Error("Google Gemini 3.8 sigue saturado por alta demanda (503). Por favor selecciona 'Modelo Local en GPU Colab' para procesar sin servidores externos.")
 
     else:
         raise gr.Error(f"Modelo no soportado: {model_choice}")
@@ -845,21 +835,21 @@ def build_ui():
                             type="filepath",
                         )
 
-                        with gr.Accordion("⚙️ Configuración del Modelo de IA", open=False):
-                            p1_model = gr.Dropdown(
-                                [
-                                    "Google Gemini (con reintento anti-503: 1.5 Flash / 2.0 / 3.8)",
-                                    "Groq - Llama 3.3 70B (Recomendado: 100% libre, sin errores 503)",
-                                    "Local GPU Colab (Qwen 2.5 3B - Sin APIs ni llaves, corre en tu GPU)",
-                                ],
-                                value="Google Gemini (con reintento anti-503: 1.5 Flash / 2.0 / 3.8)",
-                                label="Motor de Inteligencia Artificial",
-                            )
-                            p1_api_key = gr.Textbox(
-                                label="API Key (Opcional si ya la guardaste en Colab Secrets)",
-                                type="password",
-                                placeholder="Pega tu clave de Gemini o Groq si no usas Secrets",
-                            )
+                        p1_model = gr.Radio(
+                            [
+                                ("🧠 Modelo Local en GPU Colab (Qwen 2.5 3B - 100% Libre, Cero APIs ni llaves)", "Local"),
+                                ("⚡ Groq Cloud (Llama 3.3 70B de Meta - Ultra rápido, libre de 503)", "Groq"),
+                                ("🌐 Google Gemini 3.8 Flash (con reintento de espera)", "Gemini"),
+                            ],
+                            value="Local",
+                            label="Motor de Inteligencia Artificial para el Informe",
+                            info="El 'Modelo Local' corre 100% en la GPU de tu Colab sin internet ni APIs de Google (recomendado).",
+                        )
+                        p1_api_key = gr.Textbox(
+                            label="API Key (Opcional: SOLO si eliges Groq o Gemini)",
+                            type="password",
+                            placeholder="NO necesaria para el Modelo Local en GPU",
+                        )
 
                         p1_btn = gr.Button(
                             "🚀 Reconstruir Seminario y Generar Informe",
@@ -947,17 +937,17 @@ def build_ui():
                                 value="medium",
                                 label="Modelo Whisper",
                             )
-                            p2_llm_model = gr.Dropdown(
+                            p2_llm_model = gr.Radio(
                                 [
-                                    "Google Gemini (con reintento anti-503: 1.5 Flash / 2.0 / 3.8)",
-                                    "Groq - Llama 3.3 70B (Recomendado: 100% libre, sin errores 503)",
-                                    "Local GPU Colab (Qwen 2.5 3B - Sin APIs ni llaves, corre en tu GPU)",
+                                    ("🧠 Modelo Local en GPU Colab (Qwen 2.5 3B - 100% Libre, Cero APIs)", "Local"),
+                                    ("⚡ Groq Cloud (Llama 3.3 70B de Meta - Ultra rápido)", "Groq"),
+                                    ("🌐 Google Gemini 3.8 Flash", "Gemini"),
                                 ],
-                                value="Google Gemini (con reintento anti-503: 1.5 Flash / 2.0 / 3.8)",
+                                value="Local",
                                 label="Modelo para Reconstrucción",
                             )
                             p2_api_key = gr.Textbox(
-                                label="API Key de Gemini / Groq (opcional si está en Secrets)",
+                                label="API Key de Gemini / Groq (opcional)",
                                 type="password",
                             )
 
