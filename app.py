@@ -41,18 +41,80 @@ def fmt_time(seconds):
     return f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
 
 
+def clean_transcript_text(text):
+    """Limpia la transcripción eliminando encabezados de página de PDFs previos y
+    colapsando bucles de repetición/alucinaciones de Whisper."""
+    if not text:
+        return ""
+    lines = text.split("\n")
+    cleaned = []
+    prev_content = None
+    rep_count = 0
+
+    for line in lines:
+        l = line.strip()
+        if not l:
+            continue
+        # Descartar encabezados y pies de página típicos de exportaciones previas
+        if re.match(r"^P[aá]gina \d+", l, re.IGNORECASE):
+            continue
+        if "Transcripci" in l and "seminario" in l:
+            continue
+        if l.startswith("Archivo:") and "Idioma original:" in l:
+            continue
+        if "Informe T" in l and "Transcrip AI" in l:
+            continue
+        if "Informe Ejecutivo y Reconstrucci" in l:
+            continue
+
+        # Extraer contenido puro sin marcas de tiempo [HH:MM:SS] para detectar bucles
+        content_only = re.sub(r"^\[\d{1,2}:\d{2}:\d{2}\]\s*|^\[\d{1,2}:\d{2}\]\s*", "", l).strip()
+        if not content_only:
+            continue
+
+        if prev_content and content_only.lower() == prev_content.lower():
+            rep_count += 1
+            if rep_count == 1:
+                # Permitir máximo 1 repetición legítima
+                cleaned.append(l)
+            elif rep_count == 2:
+                cleaned.append("[... repeticiones idénticas omitidas ...]")
+            # Más de 2 repeticiones sucesivas son descartadas
+        else:
+            rep_count = 0
+            prev_content = content_only
+            cleaned.append(l)
+
+    return "\n".join(cleaned)
+
+
+def safe_truncate_transcript(text, max_chars=45000):
+    """Asegura que el texto de la transcripción quepa en el contexto del modelo,
+    conservando el inicio (60%) y el desenlace/Q&A (40%), nunca truncando abruptamente."""
+    if not text or len(text) <= max_chars:
+        return text
+    part1 = int(max_chars * 0.6)
+    part2 = int(max_chars * 0.4)
+    return (
+        text[:part1]
+        + "\n\n[... PARTE CENTRAL CONDENSADA POR EXTENSIÓN PARA PRESERVAR INICIO Y CONCLUSIONES/PREGUNTAS ...]\n\n"
+        + text[-part2:]
+    )
+
+
 def extract_text_from_file(file_path):
-    """Extrae texto de un archivo PDF o TXT."""
+    """Extrae texto de un archivo PDF o TXT y aplica limpieza de bucles y encabezados."""
     if not file_path:
         return ""
     real_path = file_path if isinstance(file_path, str) else getattr(file_path, "name", str(file_path))
     if not os.path.exists(real_path):
         return ""
     ext = os.path.splitext(real_path)[1].lower()
+    raw_text = ""
     if ext == ".txt" or ext == ".md":
         try:
             with open(real_path, "r", encoding="utf-8", errors="ignore") as f:
-                return f.read()
+                raw_text = f.read()
         except Exception as e:
             return f"[Error leyendo TXT: {e}]"
     elif ext == ".pdf":
@@ -65,10 +127,11 @@ def extract_text_from_file(file_path):
                 t = p.extract_text()
                 if t:
                     pages.append(t)
-            return "\n\n".join(pages)
+            raw_text = "\n\n".join(pages)
         except Exception as e:
             return f"[Error extrayendo texto del PDF: {e}]"
-    return ""
+    
+    return clean_transcript_text(raw_text)
 
 
 # ---------------------------------------------------------------------------
@@ -349,7 +412,10 @@ def call_llm_for_reconstruction(
     progress=None,
 ):
     """Envía la transcripción y el contexto al LLM para generar la reconstrucción y el resumen."""
-    # 1. Armar contexto adicional
+    # 1. Asegurar limpieza y formato compacto de la transcripción
+    cleaned_transcript = clean_transcript_text(transcription_text)
+
+    # 2. Armar contexto adicional (abstracts, correos, notas, PDFs)
     context_blocks = []
     if context_text and context_text.strip():
         context_blocks.append(f"=== CORREO DE ANUNCIO / NOTAS / ABSTRACT ===\n{context_text.strip()}")
@@ -362,15 +428,24 @@ def call_llm_for_reconstruction(
                 bname = os.path.basename(cf_path)
                 txt = extract_text_from_file(cf_path)
                 if txt:
-                    context_blocks.append(f"=== ARCHIVO DE APOYO ({bname}) ===\n{txt[:45000]}")
+                    context_blocks.append(f"=== ARCHIVO DE APOYO ({bname}) ===\n{txt[:25000]}")
 
     full_context_str = "\n\n".join(context_blocks) if context_blocks else "[No se proporcionó contexto adicional]"
 
+    # 3. Truncado seguro preservando inicio y desenlace si la transcripción es inusualmente kilométrica
+    safe_transcript = safe_truncate_transcript(cleaned_transcript, max_chars=42000)
+
     user_prompt = (
-        f"# TÍTULO O TEMA SUGERIDO: {title}\n\n"
-        f"# CONTEXTO ADICIONAL PROVISTO:\n{full_context_str}\n\n"
-        f"# TRANSCRIPCIÓN DEL EVENTO:\n{transcription_text}\n\n"
-        "Genera ahora la Ficha Técnica, la Reconstrucción Integral, el Resumen Ejecutivo y el Análisis de la Sesión de Preguntas (Q&A) siguiendo tus instrucciones."
+        f"# TÍTULO SUGERIDO O TEMA: {title}\n\n"
+        f"# INFORMACIÓN CONTEXTUAL DE APOYO (Abstract, ponente o correo de anuncio):\n{full_context_str}\n\n"
+        f"# TRANSCRIPCIÓN DEL SEMINARIO:\n{safe_transcript}\n\n"
+        "# INSTRUCCIÓN CLAVE:\n"
+        "Genera de forma completa, rigurosa y en español formal el informe con las 4 secciones solicitadas:\n"
+        "## 1. Ficha Técnica y Diagnóstico de la Grabación\n"
+        "## 2. Reconstrucción Integral del Seminario (Hilo Conductor)\n"
+        "## 3. Resumen Ejecutivo y Puntos Rescatables ('Key Takeaways')\n"
+        "## 4. Sesión de Preguntas y Respuestas (Q&A) y Debate\n\n"
+        "Inicia tu respuesta directamente con el encabezado '## 1. Ficha Técnica y Diagnóstico de la Grabación'."
     )
 
     if "Local" in model_choice or "Qwen" in model_choice:
@@ -379,12 +454,18 @@ def call_llm_for_reconstruction(
         from transformers import AutoModelForCausalLM, AutoTokenizer
         import torch
 
+        # Soporte nativo de bfloat16 en GPUs modernas (A100 / L4) o float16 en T4
+        use_bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+        torch_dtype = torch.bfloat16 if use_bf16 else (torch.float16 if torch.cuda.is_available() else torch.float32)
+        attn_impl = "sdpa" if torch.cuda.is_available() else "eager"
+
         model_id = "Qwen/Qwen2.5-3B-Instruct"
         tokenizer = AutoTokenizer.from_pretrained(model_id)
         model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            torch_dtype=torch_dtype,
             device_map="auto" if torch.cuda.is_available() else None,
+            attn_implementation=attn_impl,
         )
 
         messages = [
@@ -393,33 +474,33 @@ def call_llm_for_reconstruction(
         ]
         text_input = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         model_inputs = tokenizer([text_input], return_tensors="pt").to(model.device)
-
-        # Proteger la GPU T4 de OOM por atención cuadrática en textos gigantes
-        if model_inputs.input_ids.shape[1] > 7500:
-            model_inputs["input_ids"] = model_inputs["input_ids"][:, :7500]
-            if "attention_mask" in model_inputs:
-                model_inputs["attention_mask"] = model_inputs["attention_mask"][:, :7500]
+        prompt_len = model_inputs.input_ids.shape[1]
 
         if progress:
-            progress(0.45, desc="Generando reconstrucción e informe en tu GPU local...")
+            progress(0.40, desc=f"Generando reconstrucción académica en GPU ({prompt_len} tokens de entrada)...")
 
-        generated_ids = model.generate(
-            **model_inputs,
-            max_new_tokens=4096,
-            temperature=0.3,
-        )
-        generated_ids = [
-            output_ids[len(input_ids) :]
-            for input_ids, output_ids in zip(model_inputs.input_ids, generated_ids)
-        ]
-        response_text = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        with torch.no_grad():
+            generated_ids = model.generate(
+                **model_inputs,
+                max_new_tokens=3500,
+                temperature=0.3,
+                do_sample=True,
+                top_p=0.9,
+                repetition_penalty=1.1,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+
+        # Extraer estrictamente los nuevos tokens generados por el asistente
+        response_tokens = generated_ids[0][prompt_len:]
+        response_text = tokenizer.decode(response_tokens, skip_special_tokens=True).strip()
 
         del model
         del tokenizer
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        return response_text, "Qwen 2.5 3B (Local en GPU T4)"
+        dev_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU Local"
+        return response_text, f"Qwen 2.5 3B (Local en {dev_name})"
 
     elif "Groq" in model_choice or "Llama" in model_choice:
         from groq import Groq
@@ -437,7 +518,10 @@ def call_llm_for_reconstruction(
             )
 
         client = Groq(api_key=api_key)
-        for groq_model in ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]:
+        groq_models = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+        last_err = None
+
+        for groq_model in groq_models:
             try:
                 if progress:
                     progress(0.4, desc=f"Reconstruyendo con {groq_model} en Groq...")
@@ -448,12 +532,16 @@ def call_llm_for_reconstruction(
                         {"role": "user", "content": user_prompt},
                     ],
                     temperature=0.3,
+                    max_tokens=3500,
                 )
-                return response.choices[0].message.content or "", f"Meta ({groq_model} vía Groq)"
+                content = response.choices[0].message.content or ""
+                if content.strip():
+                    return content.strip(), f"Meta ({groq_model} vía Groq)"
             except Exception as e:
+                last_err = e
                 print(f"Aviso Groq {groq_model}: {e}")
                 continue
-        raise gr.Error("No se pudo completar con Groq.")
+        raise gr.Error(f"No se pudo completar con Groq ({last_err}). Te sugerimos seleccionar 'Modelo Local en GPU Colab' para correr directamente en tu GPU sin cuotas de API.")
 
     elif "Gemini" in model_choice:
         from google import genai
@@ -481,13 +569,13 @@ def call_llm_for_reconstruction(
                 last_err = e
                 err_str = str(e).lower()
                 if "503" in err_str or "unavailable" in err_str or "high demand" in err_str:
-                    wait_sec = 3 * (attempt + 1)
+                    wait_sec = 4 * (attempt + 1)
                     print(f"Gemini 3.8 saturado (503). Reintentando en {wait_sec}s...")
                     time.sleep(wait_sec)
                     continue
                 else:
                     raise e
-        raise gr.Error("Google Gemini 3.8 sigue saturado por alta demanda (503). Por favor selecciona 'Modelo Local en GPU Colab' para procesar sin servidores externos.")
+        raise gr.Error("Google Gemini 3.8 sigue saturado por alta demanda (503). Por favor selecciona 'Modelo Local en GPU Colab' o 'Groq Cloud'.")
 
     else:
         raise gr.Error(f"Modelo no soportado: {model_choice}")
@@ -529,9 +617,11 @@ def run_reconstruction_from_file(
     elapsed = time.time() - start_time
 
     progress(0.85, desc="Generando PDF del informe ejecutivo...")
-    out_dir = tempfile.mkdtemp()
-    out_pdf_path = os.path.join(out_dir, f"{stem}_informe_reconstruido.pdf")
-    out_md_path = os.path.join(out_dir, f"{stem}_informe_reconstruido.md")
+    out_dir = os.path.abspath("outputs")
+    os.makedirs(out_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_pdf_path = os.path.join(out_dir, f"{stem}_{ts}_informe.pdf")
+    out_md_path = os.path.join(out_dir, f"{stem}_{ts}_informe.md")
 
     with open(out_md_path, "w", encoding="utf-8") as f:
         f.write(md_result)
@@ -683,6 +773,10 @@ def transcribe_pipeline(
         task=whisper_task,
         fp16=(DEVICE == "cuda"),
         verbose=False,
+        condition_on_previous_text=False,
+        compression_ratio_threshold=2.4,
+        no_speech_threshold=0.6,
+        logprob_threshold=-1.0,
     )
     whisper_elapsed = time.time() - start_time
     detected_lang = result.get("language", audio_lang)
@@ -693,8 +787,10 @@ def transcribe_pipeline(
         if seg["text"].strip()
     ]
 
-    out_dir = tempfile.mkdtemp()
-    orig_txt_path = os.path.join(out_dir, f"{stem}_original_{detected_lang}.txt")
+    out_dir = os.path.abspath("outputs")
+    os.makedirs(out_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    orig_txt_path = os.path.join(out_dir, f"{stem}_{ts}_original_{detected_lang}.txt")
     with open(orig_txt_path, "w", encoding="utf-8") as f:
         for tag, txt in raw_entries:
             f.write(f"[{tag}] {txt}\n")
@@ -724,8 +820,8 @@ def transcribe_pipeline(
     # PDF de transcripción
     progress(0.85, desc="Generando PDF de transcripción...")
     suffix = "_espanol" if translated_to_spanish else ""
-    transcript_pdf_path = os.path.join(out_dir, f"{stem}{suffix}.pdf")
-    transcript_txt_path = os.path.join(out_dir, f"{stem}{suffix}.txt")
+    transcript_pdf_path = os.path.join(out_dir, f"{stem}_{ts}{suffix}.pdf")
+    transcript_txt_path = os.path.join(out_dir, f"{stem}_{ts}{suffix}.txt")
 
     full_transcript_str = "\n".join(f"[{tag}] {txt}" for tag, txt in final_entries)
     with open(transcript_txt_path, "w", encoding="utf-8") as f:
@@ -760,8 +856,8 @@ def transcribe_pipeline(
                 api_key_override=gemini_key_ui,
                 progress=progress,
             )
-            analysis_pdf_path = os.path.join(out_dir, f"{stem}_informe_reconstruido.pdf")
-            analysis_md_path = os.path.join(out_dir, f"{stem}_informe_reconstruido.md")
+            analysis_pdf_path = os.path.join(out_dir, f"{stem}_{ts}_informe.pdf")
+            analysis_md_path = os.path.join(out_dir, f"{stem}_{ts}_informe.md")
 
             with open(analysis_md_path, "w", encoding="utf-8") as f:
                 f.write(reconstruction_text)
@@ -847,13 +943,13 @@ def build_ui():
 
                         p1_model = gr.Radio(
                             [
-                                ("⚡ Groq Cloud (Llama 3.3 70B de Meta - Recomendado: 128k contexto, sin límites)", "Groq"),
-                                ("🧠 Modelo Local en GPU Colab (Qwen 2.5 3B - Sin internet ni claves)", "Local"),
-                                ("🌐 Google Gemini 3.8 Flash (con reintento)", "Gemini"),
+                                ("🧠 Modelo Local en GPU Colab (Qwen 2.5 3B - Recomendado en A100/L4: 100% autónomo, sin claves ni límites)", "Local"),
+                                ("⚡ Groq Cloud (Llama 3.3 70B - Ultrarrápido, usa tu GROQ_API_KEY)", "Groq"),
+                                ("🌐 Google Gemini 3.8 Flash (Requiere GEMINI_API_KEY)", "Gemini"),
                             ],
-                            value="Groq",
+                            value="Local",
                             label="Motor de Inteligencia Artificial para el Informe",
-                            info="Groq con Llama 3.3 70B procesa seminarios completos en 3 segundos usando tu clave de Colab Secrets.",
+                            info="En Colab Pro con GPU A100 o L4, el Modelo Local analiza el seminario en ~15 segundos con total autonomía y sin problemas de cuotas de API.",
                         )
                         p1_api_key = gr.Textbox(
                             label="API Key (Opcional: SOLO si eliges Groq o Gemini)",
@@ -949,11 +1045,11 @@ def build_ui():
                             )
                             p2_llm_model = gr.Radio(
                                 [
-                                    ("⚡ Groq Cloud (Llama 3.3 70B de Meta - Recomendado)", "Groq"),
-                                    ("🧠 Modelo Local en GPU Colab (Qwen 2.5 3B)", "Local"),
+                                    ("🧠 Modelo Local en GPU Colab (Qwen 2.5 3B - Recomendado en A100/L4)", "Local"),
+                                    ("⚡ Groq Cloud (Llama 3.3 70B)", "Groq"),
                                     ("🌐 Google Gemini 3.8 Flash", "Gemini"),
                                 ],
-                                value="Groq",
+                                value="Local",
                                 label="Modelo para Reconstrucción",
                             )
                             p2_api_key = gr.Textbox(
@@ -1008,14 +1104,18 @@ def build_ui():
 
 if __name__ == "__main__":
     if DEVICE == "cpu":
-        print("ℹ️ Ejecutando en CPU. Para transcribir audio rápido activa la GPU T4 en Colab.")
+        print("ℹ️ Ejecutando en CPU. Para transcribir audio rápido activa la GPU (L4 o A100) en Colab.")
     else:
         print(f"✅ Dispositivo: CUDA ({torch.cuda.get_device_name(0)})")
 
     user = os.environ.get("APP_USER", "seminarios")
     password = os.environ.get("APP_PASSWORD", "")
 
+    outputs_dir = os.path.abspath("outputs")
+    os.makedirs(outputs_dir, exist_ok=True)
+
     build_ui().queue(default_concurrency_limit=1).launch(
         share=True,
         auth=(user, password) if password else None,
+        allowed_paths=[outputs_dir, tempfile.gettempdir()],
     )
