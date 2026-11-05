@@ -3,3 +3,5 @@ gradio>=4.44
 reportlab
 google-genai
 deep-translator
+pypdf
+groq
