@@ -394,6 +394,12 @@ def call_llm_for_reconstruction(
         text_input = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         model_inputs = tokenizer([text_input], return_tensors="pt").to(model.device)
 
+        # Proteger la GPU T4 de OOM por atención cuadrática en textos gigantes
+        if model_inputs.input_ids.shape[1] > 7500:
+            model_inputs["input_ids"] = model_inputs["input_ids"][:, :7500]
+            if "attention_mask" in model_inputs:
+                model_inputs["attention_mask"] = model_inputs["attention_mask"][:, :7500]
+
         if progress:
             progress(0.45, desc="Generando reconstrucción e informe en tu GPU local...")
 
@@ -841,13 +847,13 @@ def build_ui():
 
                         p1_model = gr.Radio(
                             [
-                                ("🧠 Modelo Local en GPU Colab (Qwen 2.5 3B - 100% Libre, Cero APIs ni llaves)", "Local"),
-                                ("⚡ Groq Cloud (Llama 3.3 70B de Meta - Ultra rápido, libre de 503)", "Groq"),
-                                ("🌐 Google Gemini 3.8 Flash (con reintento de espera)", "Gemini"),
+                                ("⚡ Groq Cloud (Llama 3.3 70B de Meta - Recomendado: 128k contexto, sin límites)", "Groq"),
+                                ("🧠 Modelo Local en GPU Colab (Qwen 2.5 3B - Sin internet ni claves)", "Local"),
+                                ("🌐 Google Gemini 3.8 Flash (con reintento)", "Gemini"),
                             ],
-                            value="Local",
+                            value="Groq",
                             label="Motor de Inteligencia Artificial para el Informe",
-                            info="El 'Modelo Local' corre 100% en la GPU de tu Colab sin internet ni APIs de Google (recomendado).",
+                            info="Groq con Llama 3.3 70B procesa seminarios completos en 3 segundos usando tu clave de Colab Secrets.",
                         )
                         p1_api_key = gr.Textbox(
                             label="API Key (Opcional: SOLO si eliges Groq o Gemini)",
@@ -943,11 +949,11 @@ def build_ui():
                             )
                             p2_llm_model = gr.Radio(
                                 [
-                                    ("🧠 Modelo Local en GPU Colab (Qwen 2.5 3B - 100% Libre, Cero APIs)", "Local"),
-                                    ("⚡ Groq Cloud (Llama 3.3 70B de Meta - Ultra rápido)", "Groq"),
+                                    ("⚡ Groq Cloud (Llama 3.3 70B de Meta - Recomendado)", "Groq"),
+                                    ("🧠 Modelo Local en GPU Colab (Qwen 2.5 3B)", "Local"),
                                     ("🌐 Google Gemini 3.8 Flash", "Gemini"),
                                 ],
-                                value="Local",
+                                value="Groq",
                                 label="Modelo para Reconstrucción",
                             )
                             p2_api_key = gr.Textbox(
