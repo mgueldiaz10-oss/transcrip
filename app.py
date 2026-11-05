@@ -384,16 +384,33 @@ def call_llm_for_reconstruction(
             )
 
         client = genai.Client(api_key=api_key)
-        gemini_model = "gemini-2.5-flash" if "2.5" in model_choice else "gemini-1.5-flash"
+        if "2.5" in model_choice:
+            preferred = "gemini-2.5-flash"
+        elif "1.5" in model_choice:
+            preferred = "gemini-1.5-flash"
+        else:
+            preferred = "gemini-3.8-flash"
 
-        if progress:
-            progress(0.4, desc=f"Reconstruyendo y analizando con {gemini_model}...")
+        candidates = [preferred, "gemini-3.8-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
+        candidates = list(dict.fromkeys(candidates))
 
-        response = client.models.generate_content(
-            model=gemini_model,
-            contents=[RECONSTRUCTION_PROMPT + "\n\n" + user_prompt],
-        )
-        return response.text or "", f"Google {gemini_model}"
+        last_err = None
+        for mod in candidates:
+            try:
+                if progress:
+                    progress(0.4, desc=f"Reconstruyendo y analizando con {mod}...")
+                response = client.models.generate_content(
+                    model=mod,
+                    contents=[RECONSTRUCTION_PROMPT + "\n\n" + user_prompt],
+                )
+                return response.text or "", f"Google {mod}"
+            except Exception as e:
+                last_err = e
+                err_str = str(e).lower()
+                if "404" in err_str or "not_found" in err_str or "no longer available" in err_str:
+                    continue
+                raise e
+        raise last_err
 
     elif "Groq" in model_choice:
         from groq import Groq
@@ -509,10 +526,25 @@ def translate_with_gemini(raw_entries, api_key, progress=None):
             + "\n".join(batch_lines)
         )
 
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-        )
+        candidates = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
+        response = None
+        used_model = "gemini-3.8-flash"
+        for mod in candidates:
+            try:
+                response = client.models.generate_content(
+                    model=mod,
+                    contents=prompt,
+                )
+                used_model = mod
+                break
+            except Exception as e:
+                err_str = str(e).lower()
+                if "404" in err_str or "not_found" in err_str or "no longer available" in err_str:
+                    continue
+                raise e
+
+        if response is None:
+            raise RuntimeError("No se pudo conectar a ningún modelo de Gemini disponible.")
 
         lines = [ln.strip() for ln in (response.text or "").split("\n") if ln.strip()]
         for ln in lines:
@@ -525,7 +557,7 @@ def translate_with_gemini(raw_entries, api_key, progress=None):
     if not translated_entries:
         raise ValueError("Gemini no devolvió texto traducido.")
 
-    return translated_entries, "Gemini AI (2.5 Flash)"
+    return translated_entries, f"Gemini AI ({used_model})"
 
 
 def translate_with_fallback(raw_entries, progress=None):
@@ -762,11 +794,12 @@ def build_ui():
                         with gr.Accordion("⚙️ Configuración del Modelo de IA", open=False):
                             p1_model = gr.Dropdown(
                                 [
-                                    "Gemini 2.5 Flash (Recomendado: Gratuito en AI Studio, 1M contexto)",
-                                    "Gemini 1.5 Flash (Gratuito en AI Studio)",
+                                    "Gemini 3.8 Flash (Recomendado: Gratuito en AI Studio, 1M contexto)",
+                                    "Gemini 2.5 Flash",
+                                    "Gemini 1.5 Flash",
                                     "Groq - Llama 3.3 70B (Modelo abierto de Meta, ultra rápido)",
                                 ],
-                                value="Gemini 2.5 Flash (Recomendado: Gratuito en AI Studio, 1M contexto)",
+                                value="Gemini 3.8 Flash (Recomendado: Gratuito en AI Studio, 1M contexto)",
                                 label="Modelo de Inteligencia Artificial",
                             )
                             p1_api_key = gr.Textbox(
@@ -863,11 +896,12 @@ def build_ui():
                             )
                             p2_llm_model = gr.Dropdown(
                                 [
-                                    "Gemini 2.5 Flash (Recomendado: Gratuito en AI Studio, 1M contexto)",
-                                    "Gemini 1.5 Flash (Gratuito en AI Studio)",
+                                    "Gemini 3.8 Flash (Recomendado: Gratuito en AI Studio, 1M contexto)",
+                                    "Gemini 2.5 Flash",
+                                    "Gemini 1.5 Flash",
                                     "Groq - Llama 3.3 70B (Modelo abierto de Meta)",
                                 ],
-                                value="Gemini 2.5 Flash (Recomendado: Gratuito en AI Studio, 1M contexto)",
+                                value="Gemini 3.8 Flash (Recomendado: Gratuito en AI Studio, 1M contexto)",
                                 label="Modelo para Reconstrucción",
                             )
                             p2_api_key = gr.Textbox(
