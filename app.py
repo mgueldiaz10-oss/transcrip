@@ -9,6 +9,7 @@ Uso en Google Colab:
 import html
 import os
 import re
+import shutil
 import tempfile
 import time
 from datetime import datetime
@@ -39,6 +40,41 @@ def get_model(name):
 def fmt_time(seconds):
     s = int(seconds)
     return f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
+
+
+def get_storage_dirs():
+    """Devuelve el directorio local outputs/ y, si Google Drive está montado en Colab,
+    la ruta a /content/drive/MyDrive/transcripciones."""
+    local_dir = os.path.abspath("outputs")
+    os.makedirs(local_dir, exist_ok=True)
+
+    drive_base = "/content/drive/MyDrive"
+    gdrive_dir = None
+    if os.path.isdir(drive_base):
+        target = os.path.join(drive_base, "transcripciones")
+        try:
+            os.makedirs(target, exist_ok=True)
+            gdrive_dir = target
+        except Exception as e:
+            print(f"Aviso al acceder a la carpeta de Google Drive: {e}")
+
+    return local_dir, gdrive_dir
+
+
+def sync_to_drive(file_paths, gdrive_dir):
+    """Copia los archivos generados a Google Drive (carpeta 'transcripciones') si está disponible."""
+    if not gdrive_dir:
+        return []
+    copied = []
+    for fp in file_paths:
+        if fp and os.path.exists(fp):
+            try:
+                dest = os.path.join(gdrive_dir, os.path.basename(fp))
+                shutil.copy2(fp, dest)
+                copied.append(os.path.basename(fp))
+            except Exception as e:
+                print(f"Error copiando {fp} a Google Drive: {e}")
+    return copied
 
 
 def clean_transcript_text(text):
@@ -617,23 +653,28 @@ def run_reconstruction_from_file(
     elapsed = time.time() - start_time
 
     progress(0.85, desc="Generando PDF del informe ejecutivo...")
-    out_dir = os.path.abspath("outputs")
-    os.makedirs(out_dir, exist_ok=True)
+    local_dir, gdrive_dir = get_storage_dirs()
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_pdf_path = os.path.join(out_dir, f"{stem}_{ts}_informe.pdf")
-    out_md_path = os.path.join(out_dir, f"{stem}_{ts}_informe.md")
+    out_pdf_path = os.path.join(local_dir, f"{stem}_{ts}_informe.pdf")
+    out_md_path = os.path.join(local_dir, f"{stem}_{ts}_informe.md")
 
     with open(out_md_path, "w", encoding="utf-8") as f:
         f.write(md_result)
 
     build_analysis_pdf(md_result, title, out_pdf_path)
 
+    copied = sync_to_drive([out_pdf_path, out_md_path], gdrive_dir)
+    drive_info = ""
+    if copied:
+        drive_info = f"\n- ☁️ **Guardado automáticamente en Google Drive:** `Mi unidad/transcripciones/` ({', '.join(copied)})"
+
     word_count = len(transcript_text.split())
     status_msg = (
         f"✅ **Reconstrucción e Informe completados en {elapsed:.1f} segundos**.\n\n"
         f"- **Motor de IA utilizado:** {engine_name}\n"
         f"- **Archivo analizado:** `{source_name}` (~{word_count} palabras)\n"
-        f"- **Documentos de apoyo procesados:** {'Sí' if context_files or (context_text and context_text.strip()) else 'No proporcionados'}\n\n"
+        f"- **Documentos de apoyo procesados:** {'Sí' if context_files or (context_text and context_text.strip()) else 'No proporcionados'}"
+        f"{drive_info}\n\n"
         "📄 **Descarga tu PDF y archivo Markdown abajo**, o consulta el informe directamente en pantalla."
     )
     return out_pdf_path, out_md_path, md_result, status_msg
@@ -787,10 +828,9 @@ def transcribe_pipeline(
         if seg["text"].strip()
     ]
 
-    out_dir = os.path.abspath("outputs")
-    os.makedirs(out_dir, exist_ok=True)
+    local_dir, gdrive_dir = get_storage_dirs()
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    orig_txt_path = os.path.join(out_dir, f"{stem}_{ts}_original_{detected_lang}.txt")
+    orig_txt_path = os.path.join(local_dir, f"{stem}_{ts}_original_{detected_lang}.txt")
     with open(orig_txt_path, "w", encoding="utf-8") as f:
         for tag, txt in raw_entries:
             f.write(f"[{tag}] {txt}\n")
@@ -820,8 +860,8 @@ def transcribe_pipeline(
     # PDF de transcripción
     progress(0.85, desc="Generando PDF de transcripción...")
     suffix = "_espanol" if translated_to_spanish else ""
-    transcript_pdf_path = os.path.join(out_dir, f"{stem}_{ts}{suffix}.pdf")
-    transcript_txt_path = os.path.join(out_dir, f"{stem}_{ts}{suffix}.txt")
+    transcript_pdf_path = os.path.join(local_dir, f"{stem}_{ts}{suffix}.pdf")
+    transcript_txt_path = os.path.join(local_dir, f"{stem}_{ts}{suffix}.txt")
 
     full_transcript_str = "\n".join(f"[{tag}] {txt}" for tag, txt in final_entries)
     with open(transcript_txt_path, "w", encoding="utf-8") as f:
@@ -856,8 +896,8 @@ def transcribe_pipeline(
                 api_key_override=gemini_key_ui,
                 progress=progress,
             )
-            analysis_pdf_path = os.path.join(out_dir, f"{stem}_{ts}_informe.pdf")
-            analysis_md_path = os.path.join(out_dir, f"{stem}_{ts}_informe.md")
+            analysis_pdf_path = os.path.join(local_dir, f"{stem}_{ts}_informe.pdf")
+            analysis_md_path = os.path.join(local_dir, f"{stem}_{ts}_informe.md")
 
             with open(analysis_md_path, "w", encoding="utf-8") as f:
                 f.write(reconstruction_text)
@@ -865,6 +905,16 @@ def transcribe_pipeline(
             build_analysis_pdf(reconstruction_text, title, analysis_pdf_path)
         except Exception as e:
             reconstruction_text = f"⚠️ No se pudo completar la reconstrucción automática con IA: {e}"
+
+    # Sincronizar archivos generados con Google Drive si está montado
+    files_to_sync = [transcript_pdf_path, transcript_txt_path, orig_txt_path]
+    if analysis_pdf_path and os.path.exists(analysis_pdf_path):
+        files_to_sync.extend([analysis_pdf_path, analysis_md_path])
+    
+    copied = sync_to_drive(files_to_sync, gdrive_dir)
+    drive_info = ""
+    if copied:
+        drive_info = f"\n- ☁️ **Guardado automáticamente en Google Drive:** `Mi unidad/transcripciones/` ({len(copied)} archivos)"
 
     total_elapsed = time.time() - start_time
     status = (
@@ -875,8 +925,10 @@ def transcribe_pipeline(
         status += f"- Traducción al español: **{engine_used}**\n"
     if analysis_pdf_path:
         status += "- **Informe de reconstrucción y resumen ejecutivo generado con éxito.**\n"
+    if drive_info:
+        status += drive_info + "\n"
 
-    status += "📄 Descarga tus archivos abajo."
+    status += "📄 Descarga tus archivos abajo o consúltalos en tu Google Drive."
     preview_snippet = reconstruction_text if reconstruction_text else full_transcript_str[:3000]
 
     return (
