@@ -418,12 +418,16 @@ def call_llm_for_reconstruction(
     elif "Groq" in model_choice or "Llama" in model_choice:
         from groq import Groq
 
-        api_key = (api_key_override or "").strip() or os.environ.get("GROQ_API_KEY", "").strip()
+        api_key = (
+            (api_key_override or "").strip()
+            or os.environ.get("GROQ_API_KEY", "").strip()
+            or os.environ.get("GROQ", "").strip()
+            or os.environ.get("groq_api_key", "").strip()
+        )
         if not api_key:
             raise gr.Error(
-                "Para usar Groq (Llama 3.3 70B), pega tu API Key gratuita de Groq aquí. "
-                "Puedes obtenerla en 10 segundos gratis en https://console.groq.com/keys "
-                "(o usa la opción 'Modelo Local en GPU' que no requiere ninguna clave)."
+                "No se encontró la clave de Groq. Asegúrate de que el secreto en Colab se llame 'GROQ_API_KEY' "
+                "(con el interruptor activado) o pégala directamente en el campo de texto."
             )
 
         client = Groq(api_key=api_key)
