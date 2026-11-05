@@ -42,27 +42,37 @@ def fmt_time(seconds):
     return f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
 
 
-def get_storage_dirs():
-    """Devuelve el directorio local outputs/ y, si Google Drive está montado en Colab,
-    la ruta a /content/drive/MyDrive/transcripciones."""
-    local_dir = os.path.abspath("outputs")
+def get_event_storage_dirs(title):
+    """Devuelve el directorio local outputs/<nombre_evento> y, si Google Drive está montado en Colab,
+    la ruta a /content/drive/MyDrive/transcripciones/<nombre_evento>."""
+    raw_title = (title or "").strip()
+    clean_title = re.sub(r'[\\/*?:"<>|]', "", raw_title).strip().replace(" ", "_")
+    clean_title = re.sub(r"_+", "_", clean_title).strip("_")
+
+    if not clean_title or clean_title.lower() in [
+        "seminario", "clase", "conferencia", "transcripcion", "evento", "seminario_de_investigacion"
+    ]:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        clean_title = f"{clean_title or 'evento'}_{ts}"
+
+    local_dir = os.path.join(os.path.abspath("outputs"), clean_title)
     os.makedirs(local_dir, exist_ok=True)
 
     drive_base = "/content/drive/MyDrive"
     gdrive_dir = None
     if os.path.isdir(drive_base):
-        target = os.path.join(drive_base, "transcripciones")
+        target = os.path.join(drive_base, "transcripciones", clean_title)
         try:
             os.makedirs(target, exist_ok=True)
             gdrive_dir = target
         except Exception as e:
             print(f"Aviso al acceder a la carpeta de Google Drive: {e}")
 
-    return local_dir, gdrive_dir
+    return local_dir, gdrive_dir, clean_title
 
 
 def sync_to_drive(file_paths, gdrive_dir):
-    """Copia los archivos generados a Google Drive (carpeta 'transcripciones') si está disponible."""
+    """Copia los archivos generados a Google Drive en la subcarpeta del evento si está disponible."""
     if not gdrive_dir:
         return []
     copied = []
@@ -394,16 +404,46 @@ def build_analysis_pdf(md_text, doc_title, pdf_path):
 # PROMPT Y LLM PARA RECONSTRUCCIÓN Y ANÁLISIS
 # ---------------------------------------------------------------------------
 
-RECONSTRUCTION_PROMPT = """Eres un investigador y analista académico experto en síntesis y reconstrucción de seminarios de investigación, conferencias científicas y clases universitarias avanzadas.
+CLASS_NOTES_PROMPT = """Eres un catedrático universitario y pedagogo experto en la elaboración de apuntes académicos de élite y guías de estudio avanzadas.
+Tu objetivo es transformar la transcripción de una clase universitaria, cátedra o curso especializado en un CUADERNO DE APUNTES Y GUÍA DE ESTUDIO estructurado, claro, riguroso y exhaustivo.
+Si la grabación comenzó tarde o se cortó, reconstruye los conceptos iniciales a partir del contexto provisto (temario, diapositivas, notas del curso) indicándolo explícitamente con *[Reconstrucción contextual: ...]*.
 
-Tu objetivo es procesar la transcripción de un evento académico y generar un informe técnico de altísimo nivel.
-A menudo las grabaciones presentan deficiencias reales:
-- La persona que graba llega tarde (se pierde la bienvenida, la presentación del ponente o la introducción).
-- Se corta la grabación al inicio o al final.
-- Hay baches inaudibles o acústica deficiente.
-Tu tarea es subsanar esas fallas combinando deductivamente la transcripción con el contexto disponible (correos de anuncio, abstract, diapositivas, artículos de referencia).
+Debes estructurar tus apuntes en Markdown con las siguientes 5 secciones principales (utiliza encabezados '##'):
 
-Debes generar tu respuesta ÚNICAMENTE en formato Markdown con las siguientes 4 secciones principales (utiliza encabezados '##'):
+## 1. Ficha de la Clase y Objetivos de Aprendizaje
+- **Materia o Curso:** Asignatura o disciplina correspondiente.
+- **Tema Central de la Sesión:** Título temático formal de la clase.
+- **Profesor / Catedrático:** Nombre del docente si se menciona o deduce.
+- **Objetivos de Aprendizaje:** 3 a 5 competencias o conocimientos clave que el estudiante debe dominar tras esta clase.
+- **Diagnóstico del registro:** Estado de la grabación y secciones reconstruidas si las hubo.
+
+## 2. Cuaderno de Apuntes Estructurado (Desarrollo Pedagógico de la Clase)
+- Desarrolla todos los temas vistos en clase en un orden didáctico impecable.
+- **Fundamentos y Teoría:** Explicación detallada y sin rodeos de cada concepto, ley, principio físico/químico/matemático o modelo teórico expuesto.
+- **Fórmulas, Ecuaciones y Notación:** Desglosa con precisión las expresiones matemáticas, definiendo cada variable, constante y unidades de medida.
+- **Ejemplos y Casos de Estudio:** Explica paso a paso los ejercicios, demostraciones, gráficas o aplicaciones prácticas presentadas por el profesor.
+- **Diagramas o Esquemas Conceptuales:** Describe textualmente la lógica de diagramas o experimentos abordados en clase.
+
+## 3. "Lo que el Profesor Enfatizó" (Atención para Exámenes)
+- **Advertencias y Errores Comunes:** Puntos donde los alumnos suelen equivocarse y que el docente remarcó.
+- **Preguntas típicas de evaluación:** Conceptos clave con alta probabilidad de figurar en un examen parcial o final.
+- **Criterios de rigor:** Condiciones de validez o límites de aplicabilidad de las teorías vistas.
+
+## 4. Glosario de Términos y Fórmulas Clave
+- Lista de 8 a 12 términos técnicos especializados introducidos en la sesión con su definición concisa.
+- Cuadro síntesis de fórmulas esenciales vistas en la clase.
+
+## 5. Cuestionario de Repaso y Autoevaluación
+- Banco de 5 a 8 preguntas conceptuales y de aplicación basadas estrictamente en la clase.
+- **Para cada pregunta:** Proporciona la solución o respuesta modelo detallada para que el estudiante pueda autoevaluarse antes del examen.
+
+IMPORTANTE: Escribe en un español académico didáctico, claro y riguroso; inicia directamente con el encabezado '## 1. Ficha de la Clase y Objetivos de Aprendizaje'.
+"""
+
+SEMINAR_PROMPT = """Eres un investigador y analista académico experto en síntesis y reconstrucción de seminarios de investigación y conferencias científicas.
+Tu objetivo es procesar la transcripción y el contexto disponible (correos de anuncio, abstract, diapositivas, artículos) para generar un informe técnico de altísimo nivel, subsanando inicios tardíos, cortes de audio o baches acústicos.
+
+Debes estructurar tu respuesta en Markdown con las siguientes 4 secciones principales (utiliza encabezados '##'):
 
 ## 1. Ficha Técnica y Diagnóstico de la Grabación
 - **Título formal del seminario:** Deduce o valida el título más adecuado.
@@ -414,27 +454,50 @@ Debes generar tu respuesta ÚNICAMENTE en formato Markdown con las siguientes 4 
 ## 2. Reconstrucción Integral del Seminario (Hilo Conductor)
 - Reconstruye la totalidad de la exposición en orden cronológico, fluido y lógico.
 - **Si el audio empezó a mitad de camino:** utiliza el correo de anuncio, el título y el desarrollo de la charla para reconstruir la introducción ausente, el planteamiento del problema, los antecedentes y la motivación, señalándolo explícitamente con la etiqueta *[Reconstrucción contextual a partir de anuncio/referencias: ...]* para distinguir lo deducido de lo grabado.
-- Desarrolla a profundidad los temas expuestos:
-  * Motivación, problemática y estado del arte.
-  * Metodología experimental, diseño, reactores, técnicas analíticas (ej. CFD, HPLC, espectrofotometría, electroquímica, etc.).
-  * Resultados principales, discusión de datos, gráficas explicadas y hallazgos centrales.
-  * Conclusiones del expositor y aplicaciones prácticas o futuras líneas de trabajo.
-- Incluye términos técnicos rigurosos, nombres de reactivos/compuestos, valores numéricos y relaciones causa-efecto explicadas por el ponente.
+- Desarrolla a profundidad los temas expuestos: motivación, metodología experimental, técnicas analíticas, resultados principales, discusión de datos, gráficas explicadas y conclusiones.
+- Incluye términos técnicos rigurosos, nombres de compuestos, valores numéricos y relaciones causa-efecto.
 
 ## 3. Resumen Ejecutivo y Puntos Rescatables ('Key Takeaways')
 - **Resumen ejecutivo:** Síntesis clara y fluida de 3 a 4 párrafos de alto impacto.
-- **Key Takeaways (Puntos rescatables):** Lista de 6 a 10 ideas o conclusiones fundamentales que cualquier asistente debe conservar en sus notas.
-- **Hallazgos sorprendentes o advertencias metodológicas:** Aspectos críticos, limitaciones o recomendaciones destacadas por el ponente durante la sesión.
+- **Key Takeaways (Puntos rescatables):** Lista de 6 a 10 ideas o conclusiones fundamentales.
+- **Hallazgos sorprendentes o advertencias metodológicas:** Aspectos críticos, limitaciones o recomendaciones destacadas por el ponente.
 
 ## 4. Sesión de Preguntas y Respuestas (Q&A) y Debate
-- Si la transcripción incluye una sesión final de preguntas o intervenciones de los asistentes:
-  * Desglosa cada pregunta formulada por el público o moderadores.
-  * Sintetiza la respuesta del ponente, destacando si hubo debates, consensos o dudas abiertas.
-- Si NO se grabó sesión de preguntas (o la grabación terminó antes):
-  * Indica: *"No se registró sesión de preguntas en el audio disponible."*
-  * Añade la sección: *"Preguntas críticas sugeridas para el trabajo presentado"*, con 3 o 4 preguntas de alto nivel que un colega o evaluador haría a esta investigación, junto con la respuesta o hipótesis probable basada en la literatura y los datos del seminario.
+- Desglosa cada pregunta formulada por el público/moderadores y sintetiza la respuesta del ponente.
+- Si no hubo sesión de preguntas grabada, añade *"Preguntas críticas sugeridas para el trabajo presentado"* (3-4 preguntas con sus respuestas o hipótesis fundamentadas).
 
-IMPORTANTE: Escribe en un español académico impecable, formal y sin preámbulos conversacionales; inicia directamente con el encabezado.
+IMPORTANTE: Escribe en un español académico impecable, formal y sin preámbulos conversacionales; inicia directamente con '## 1. Ficha Técnica y Diagnóstico de la Grabación'.
+"""
+
+HYBRID_PROMPT = """Eres un investigador y catedrático universitario de élite. Tu objetivo es generar un DOCUMENTO MAESTRO INTEGRAL que combine un Informe Técnico Académico con un Cuaderno Completo de Apuntes de Estudio a partir de la transcripción de una conferencia, clase avanzada o seminario.
+
+Debes estructurar tu respuesta en Markdown con las siguientes 5 secciones principales (utiliza encabezados '##'):
+
+## 1. Ficha Técnica y Objetivos de la Sesión
+- **Título formal del evento / clase:**
+- **Expositor / Catedrático:**
+- **Área del conocimiento y Palabras clave:**
+- **Diagnóstico del registro de audio y reconstrucciones contextuales:**
+
+## 2. Reconstrucción y Apuntes Detallados de la Sesión
+- Reconstrucción cronológica y pedagógica del tema (incluyendo introducción ausente si hubo corte al inicio).
+- Teoría, derivaciones, relaciones causa-efecto y principios científicos.
+- Fórmulas, ecuaciones, parámetros adimensionales y unidades.
+- Discusión de datos experimentales, gráficas y metodología.
+
+## 3. Resumen Ejecutivo y Puntos Clave ('Key Takeaways')
+- Resumen ejecutivo de alto nivel (3 párrafos).
+- 8 puntos clave indispensables.
+- Advertencias metodológicas o hallazgos críticos.
+
+## 4. "Atención para Exámenes e Investigación" y Glosario
+- Puntos críticos destacados por el ponente/profesor.
+- Glosario de términos y fórmulas clave.
+
+## 5. Sesión de Preguntas (Q&A) y Cuestionario de Autoevaluación
+- Desglose de preguntas del público o 5 preguntas clave de evaluación con sus respuestas explicadas.
+
+IMPORTANTE: Escribe en español académico impecable y formal; inicia directamente con '## 1. Ficha Técnica y Objetivos de la Sesión'.
 """
 
 
@@ -444,10 +507,11 @@ def call_llm_for_reconstruction(
     context_files,
     title,
     model_choice,
+    doc_type="class_notes",
     api_key_override=None,
     progress=None,
 ):
-    """Envía la transcripción y el contexto al LLM para generar la reconstrucción y el resumen."""
+    """Envía la transcripción y el contexto al LLM para generar apuntes o informe reconstructivo."""
     # 1. Asegurar limpieza y formato compacto de la transcripción
     cleaned_transcript = clean_transcript_text(transcription_text)
 
@@ -471,22 +535,45 @@ def call_llm_for_reconstruction(
     # 3. Truncado seguro preservando inicio y desenlace si la transcripción es inusualmente kilométrica
     safe_transcript = safe_truncate_transcript(cleaned_transcript, max_chars=42000)
 
+    # 4. Seleccionar plantilla según el tipo de documento solicitado
+    if doc_type == "class_notes":
+        system_prompt = CLASS_NOTES_PROMPT
+        doc_label = "Cuaderno de Apuntes de Clase"
+        final_instruction = (
+            "Con base en la transcripción y el contexto, redacta de inmediato el CUADERNO DE APUNTES Y GUÍA DE ESTUDIO "
+            "estructurado en Markdown con sus 5 secciones principales (## 1. Ficha de la Clase y Objetivos de Aprendizaje, "
+            "## 2. Cuaderno de Apuntes Estructurado, ## 3. 'Lo que el Profesor Enfatizó', ## 4. Glosario de Términos y Fórmulas Clave, "
+            "## 5. Cuestionario de Repaso y Autoevaluación). Redacta en español pedagógico y riguroso e inicia directamente con el "
+            "encabezado '## 1. Ficha de la Clase y Objetivos de Aprendizaje'."
+        )
+    elif doc_type == "hybrid":
+        system_prompt = HYBRID_PROMPT
+        doc_label = "Documento Maestro (Informe + Apuntes)"
+        final_instruction = (
+            "Con base en la transcripción y el contexto, genera el DOCUMENTO MAESTRO INTEGRAL en Markdown con sus 5 secciones "
+            "(## 1. Ficha Técnica y Objetivos de la Sesión, ## 2. Reconstrucción y Apuntes Detallados, ## 3. Resumen Ejecutivo y Puntos Clave, "
+            "## 4. 'Atención para Exámenes e Investigación' y Glosario, ## 5. Sesión de Preguntas (Q&A) y Cuestionario de Autoevaluación). "
+            "Inicia directamente con '## 1. Ficha Técnica y Objetivos de la Sesión'."
+        )
+    else:
+        system_prompt = SEMINAR_PROMPT
+        doc_label = "Informe de Seminario"
+        final_instruction = (
+            "Con base en la transcripción y el contexto, genera el INFORME TÉCNICO DE SEMINARIO en Markdown con sus 4 secciones "
+            "(## 1. Ficha Técnica y Diagnóstico de la Grabación, ## 2. Reconstrucción Integral del Seminario, ## 3. Resumen Ejecutivo y Puntos Rescatables, "
+            "## 4. Sesión de Preguntas y Respuestas (Q&A) y Debate). Inicia directamente con '## 1. Ficha Técnica y Diagnóstico de la Grabación'."
+        )
+
     user_prompt = (
         f"# TÍTULO SUGERIDO O TEMA: {title}\n\n"
-        f"# INFORMACIÓN CONTEXTUAL DE APOYO (Abstract, ponente o correo de anuncio):\n{full_context_str}\n\n"
-        f"# TRANSCRIPCIÓN DEL SEMINARIO:\n{safe_transcript}\n\n"
-        "# INSTRUCCIÓN CLAVE:\n"
-        "Genera de forma completa, rigurosa y en español formal el informe con las 4 secciones solicitadas:\n"
-        "## 1. Ficha Técnica y Diagnóstico de la Grabación\n"
-        "## 2. Reconstrucción Integral del Seminario (Hilo Conductor)\n"
-        "## 3. Resumen Ejecutivo y Puntos Rescatables ('Key Takeaways')\n"
-        "## 4. Sesión de Preguntas y Respuestas (Q&A) y Debate\n\n"
-        "Inicia tu respuesta directamente con el encabezado '## 1. Ficha Técnica y Diagnóstico de la Grabación'."
+        f"# INFORMACIÓN CONTEXTUAL DE APOYO (Abstract, temario o notas previas):\n{full_context_str}\n\n"
+        f"# TRANSCRIPCIÓN REGISTRADA:\n{safe_transcript}\n\n"
+        f"# INSTRUCCIÓN FINAL:\n{final_instruction}"
     )
 
     if "Local" in model_choice or "Qwen" in model_choice:
         if progress:
-            progress(0.15, desc="Cargando modelo local Qwen 2.5 3B en GPU (sin APIs externas)...")
+            progress(0.15, desc=f"Cargando modelo local Qwen 2.5 3B para generar {doc_label}...")
         from transformers import AutoModelForCausalLM, AutoTokenizer
         import torch
 
@@ -505,7 +592,7 @@ def call_llm_for_reconstruction(
         )
 
         messages = [
-            {"role": "system", "content": RECONSTRUCTION_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
         text_input = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -513,7 +600,7 @@ def call_llm_for_reconstruction(
         prompt_len = model_inputs.input_ids.shape[1]
 
         if progress:
-            progress(0.40, desc=f"Generando reconstrucción académica en GPU ({prompt_len} tokens de entrada)...")
+            progress(0.40, desc=f"Generando {doc_label} en GPU ({prompt_len} tokens de entrada)...")
 
         with torch.no_grad():
             generated_ids = model.generate(
@@ -560,11 +647,11 @@ def call_llm_for_reconstruction(
         for groq_model in groq_models:
             try:
                 if progress:
-                    progress(0.4, desc=f"Reconstruyendo con {groq_model} en Groq...")
+                    progress(0.4, desc=f"Generando {doc_label} con {groq_model} en Groq...")
                 response = client.chat.completions.create(
                     model=groq_model,
                     messages=[
-                        {"role": "system", "content": RECONSTRUCTION_PROMPT},
+                        {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
                     temperature=0.3,
@@ -597,7 +684,7 @@ def call_llm_for_reconstruction(
                     progress(0.3 + attempt * 0.15, desc=f"Conectando con Gemini 3.8 Flash (intento {attempt+1}/3)...")
                 response = client.models.generate_content(
                     model="gemini-3.8-flash",
-                    contents=[RECONSTRUCTION_PROMPT + "\n\n" + user_prompt],
+                    contents=[system_prompt + "\n\n" + user_prompt],
                 )
                 if response.text and response.text.strip():
                     return response.text.strip(), "Google Gemini 3.8 Flash"
@@ -622,18 +709,20 @@ def run_reconstruction_from_file(
     context_text,
     context_files,
     title,
+    doc_type,
     model_choice,
     api_key_override,
     progress=gr.Progress(),
 ):
-    """Pestaña 1: Procesa una transcripción ya existente (PDF o TXT)."""
+    """Pestaña 2: Procesa una transcripción ya existente (PDF o TXT)."""
     if not file_path:
         raise gr.Error("Primero sube un archivo PDF o TXT con la transcripción previa.")
 
-    title = (title or "").strip() or "Seminario Académico"
+    title = (title or "").strip() or "Clase o Seminario"
     file_real_path = file_path if isinstance(file_path, str) else getattr(file_path, "name", str(file_path))
     source_name = os.path.basename(file_real_path)
-    stem = re.sub(r"[^\w\-]+", "_", os.path.splitext(source_name)[0]).strip("_") or "seminario"
+
+    local_dir, gdrive_dir, event_slug = get_event_storage_dirs(title)
 
     progress(0.1, desc="Extrayendo texto de la transcripción previa...")
     transcript_text = extract_text_from_file(file_real_path)
@@ -647,16 +736,17 @@ def run_reconstruction_from_file(
         context_files=context_files,
         title=title,
         model_choice=model_choice,
+        doc_type=doc_type,
         api_key_override=api_key_override,
         progress=progress,
     )
     elapsed = time.time() - start_time
 
-    progress(0.85, desc="Generando PDF del informe ejecutivo...")
-    local_dir, gdrive_dir = get_storage_dirs()
+    progress(0.85, desc="Generando PDF del documento académico...")
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_pdf_path = os.path.join(local_dir, f"{stem}_{ts}_informe.pdf")
-    out_md_path = os.path.join(local_dir, f"{stem}_{ts}_informe.md")
+    doc_suffix = "apuntes" if doc_type == "class_notes" else ("integral" if doc_type == "hybrid" else "informe")
+    out_pdf_path = os.path.join(local_dir, f"{event_slug}_{doc_suffix}_{ts}.pdf")
+    out_md_path = os.path.join(local_dir, f"{event_slug}_{doc_suffix}_{ts}.md")
 
     with open(out_md_path, "w", encoding="utf-8") as f:
         f.write(md_result)
@@ -666,16 +756,16 @@ def run_reconstruction_from_file(
     copied = sync_to_drive([out_pdf_path, out_md_path], gdrive_dir)
     drive_info = ""
     if copied:
-        drive_info = f"\n- ☁️ **Guardado automáticamente en Google Drive:** `Mi unidad/transcripciones/` ({', '.join(copied)})"
+        drive_info = f"\n- ☁️ **Guardado automáticamente en Google Drive:** Carpeta `Mi unidad/transcripciones/{event_slug}/` ({', '.join(copied)})"
 
     word_count = len(transcript_text.split())
     status_msg = (
-        f"✅ **Reconstrucción e Informe completados en {elapsed:.1f} segundos**.\n\n"
+        f"✅ **Documento generado con éxito en {elapsed:.1f} segundos**.\n\n"
         f"- **Motor de IA utilizado:** {engine_name}\n"
         f"- **Archivo analizado:** `{source_name}` (~{word_count} palabras)\n"
-        f"- **Documentos de apoyo procesados:** {'Sí' if context_files or (context_text and context_text.strip()) else 'No proporcionados'}"
+        f"- **Carpeta del evento:** `{event_slug}`"
         f"{drive_info}\n\n"
-        "📄 **Descarga tu PDF y archivo Markdown abajo**, o consulta el informe directamente en pantalla."
+        "📄 **Descarga tu PDF y archivo Markdown abajo**, o consúltalos directamente en pantalla o en tu Google Drive."
     )
     return out_pdf_path, out_md_path, md_result, status_msg
 
@@ -710,9 +800,9 @@ def translate_with_gemini(raw_entries, api_key, progress=None):
             + "\n".join(batch_lines)
         )
 
-        candidates = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-3.8-flash"]
+        candidates = ["gemini-3.8-flash"]
         response = None
-        used_model = "gemini-1.5-flash"
+        used_model = "gemini-3.8-flash"
         for mod in candidates:
             try:
                 response = client.models.generate_content(
@@ -777,13 +867,14 @@ def translate_with_fallback(raw_entries, progress=None):
 
 
 # ---------------------------------------------------------------------------
-# PESTAÑA 2: FLUJO COMPLETO DESDE AUDIO
+# FLUJO COMPLETO DESDE AUDIO (PESTAÑA 1)
 # ---------------------------------------------------------------------------
 
 
 def transcribe_pipeline(
     file_path,
     title,
+    doc_type,
     audio_lang,
     target_mode,
     model_name,
@@ -797,9 +888,10 @@ def transcribe_pipeline(
     if not file_path:
         raise gr.Error("Primero sube un archivo de audio.")
 
-    title = (title or "").strip() or "Transcripción de seminario"
+    title = (title or "").strip() or "Clase o Seminario"
     source_name = os.path.basename(file_path)
-    stem = re.sub(r"[^\w\-]+", "_", os.path.splitext(source_name)[0]).strip("_") or "transcripcion"
+
+    local_dir, gdrive_dir, event_slug = get_event_storage_dirs(title)
 
     progress(0.05, desc=f"Cargando modelo Whisper ({model_name})...")
     model = get_model(model_name)
@@ -828,9 +920,8 @@ def transcribe_pipeline(
         if seg["text"].strip()
     ]
 
-    local_dir, gdrive_dir = get_storage_dirs()
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    orig_txt_path = os.path.join(local_dir, f"{stem}_{ts}_original_{detected_lang}.txt")
+    orig_txt_path = os.path.join(local_dir, f"{event_slug}_{ts}_original_{detected_lang}.txt")
     with open(orig_txt_path, "w", encoding="utf-8") as f:
         for tag, txt in raw_entries:
             f.write(f"[{tag}] {txt}\n")
@@ -859,9 +950,9 @@ def transcribe_pipeline(
 
     # PDF de transcripción
     progress(0.85, desc="Generando PDF de transcripción...")
-    suffix = "_espanol" if translated_to_spanish else ""
-    transcript_pdf_path = os.path.join(local_dir, f"{stem}_{ts}{suffix}.pdf")
-    transcript_txt_path = os.path.join(local_dir, f"{stem}_{ts}{suffix}.txt")
+    suffix_lang = "_espanol" if translated_to_spanish else ""
+    transcript_pdf_path = os.path.join(local_dir, f"{event_slug}_{ts}_transcripcion{suffix_lang}.pdf")
+    transcript_txt_path = os.path.join(local_dir, f"{event_slug}_{ts}_transcripcion{suffix_lang}.txt")
 
     full_transcript_str = "\n".join(f"[{tag}] {txt}" for tag, txt in final_entries)
     with open(transcript_txt_path, "w", encoding="utf-8") as f:
@@ -879,13 +970,13 @@ def transcribe_pipeline(
 
     build_transcript_pdf(final_entries, title, doc_subtitle, transcript_pdf_path)
 
-    # Reconstrucción opcional con LLM
+    # Reconstrucción / Apuntes opcional con LLM
     analysis_pdf_path = None
     analysis_md_path = None
     reconstruction_text = ""
 
     if run_reconstruction:
-        progress(0.9, desc="Ejecutando reconstrucción y análisis con IA...")
+        progress(0.9, desc="Generando apuntes / informe con IA...")
         try:
             reconstruction_text, llm_engine = call_llm_for_reconstruction(
                 transcription_text=full_transcript_str,
@@ -893,28 +984,30 @@ def transcribe_pipeline(
                 context_files=context_files,
                 title=title,
                 model_choice=llm_model_choice,
+                doc_type=doc_type,
                 api_key_override=gemini_key_ui,
                 progress=progress,
             )
-            analysis_pdf_path = os.path.join(local_dir, f"{stem}_{ts}_informe.pdf")
-            analysis_md_path = os.path.join(local_dir, f"{stem}_{ts}_informe.md")
+            doc_suffix = "apuntes" if doc_type == "class_notes" else ("integral" if doc_type == "hybrid" else "informe")
+            analysis_pdf_path = os.path.join(local_dir, f"{event_slug}_{ts}_{doc_suffix}.pdf")
+            analysis_md_path = os.path.join(local_dir, f"{event_slug}_{ts}_{doc_suffix}.md")
 
             with open(analysis_md_path, "w", encoding="utf-8") as f:
                 f.write(reconstruction_text)
 
             build_analysis_pdf(reconstruction_text, title, analysis_pdf_path)
         except Exception as e:
-            reconstruction_text = f"⚠️ No se pudo completar la reconstrucción automática con IA: {e}"
+            reconstruction_text = f"⚠️ No se pudo completar la generación con IA: {e}"
 
-    # Sincronizar archivos generados con Google Drive si está montado
+    # Sincronizar todos los archivos a Google Drive
     files_to_sync = [transcript_pdf_path, transcript_txt_path, orig_txt_path]
     if analysis_pdf_path and os.path.exists(analysis_pdf_path):
         files_to_sync.extend([analysis_pdf_path, analysis_md_path])
-    
+
     copied = sync_to_drive(files_to_sync, gdrive_dir)
     drive_info = ""
     if copied:
-        drive_info = f"\n- ☁️ **Guardado automáticamente en Google Drive:** `Mi unidad/transcripciones/` ({len(copied)} archivos)"
+        drive_info = f"\n\n☁️ **Guardado automáticamente en Google Drive:**\n- Carpeta: `Mi unidad/transcripciones/{event_slug}/`\n- Archivos respaldados: {len(copied)} ({', '.join(copied)})"
 
     total_elapsed = time.time() - start_time
     status = (
@@ -924,11 +1017,12 @@ def transcribe_pipeline(
     if translated_to_spanish:
         status += f"- Traducción al español: **{engine_used}**\n"
     if analysis_pdf_path:
-        status += "- **Informe de reconstrucción y resumen ejecutivo generado con éxito.**\n"
+        status += "- **Documento de apuntes / informe generado con éxito.**\n"
+    status += f"- **Carpeta del evento:** `{event_slug}`"
     if drive_info:
-        status += drive_info + "\n"
+        status += drive_info
 
-    status += "📄 Descarga tus archivos abajo o consúltalos en tu Google Drive."
+    status += "\n\n📄 Descarga tus archivos abajo o consúltalos en tu Google Drive."
     preview_snippet = reconstruction_text if reconstruction_text else full_transcript_str[:3000]
 
     return (
@@ -951,107 +1045,45 @@ def build_ui():
     custom_css = """
     .gradio-container { max-width: 1200px !important; }
     """
-    with gr.Blocks(title="Transcriptor y Analizador de Seminarios", css=custom_css) as demo:
+    with gr.Blocks(title="Transcriptor y Generador Académico", css=custom_css) as demo:
         gr.Markdown(
-            "# 🎙️ Transcriptor y Analizador Académico de Seminarios\n"
-            "Herramienta integral para **transcribir audios**, **reconstruir eventos con inicio tardío o cortes**, "
-            "**generar resúmenes ejecutivos** y **rescatar preguntas y respuestas (Q&A)** con IA."
+            "# 🎙️ Transcriptor y Generador Académico de Apuntes e Informes\n"
+            "Herramienta integral para **transcribir audios**, **elaborar apuntes de clase y guías de estudio**, "
+            "**reconstruir seminarios con inicio tardío o cortes** y **sincronizar todo en Google Drive**."
         )
 
         with gr.Tabs():
             # ===============================================================
-            # PESTAÑA 1: POST-PROCESAR TRANSCRIPCIÓN PREVIA
+            # PESTAÑA 1: FLUJO COMPLETO DESDE AUDIO
             # ===============================================================
-            with gr.Tab("📑 Post-procesar Transcripción Previa (PDF o TXT)"):
+            with gr.Tab("🎙️ Flujo Completo: Audio -> Transcripción + Apuntes / Informe"):
                 gr.Markdown(
-                    "### Reconstrucción y Resumen desde una transcripción existente\n"
-                    "Sube el **PDF o TXT que ya generaste** (sin necesidad de volver a procesar el audio). "
-                    "La IA reconstruirá el hilo conductor del seminario, subsanará inicios incompletos o cortes, "
-                    "generará un resumen ejecutivo y analizará la sesión de preguntas."
+                    "### Transcripción en GPU con Generación Automática de Apuntes o Informe\n"
+                    "Sube el archivo de audio de tu clase, seminario o conferencia. Whisper transcribirá y traducirá "
+                    "el audio con GPU, y la IA estructurará de inmediato tus apuntes de estudio o informe ejecutivo en una carpeta propia en Drive."
                 )
                 with gr.Row():
                     with gr.Column(scale=5):
-                        p1_file = gr.File(
-                            label="📄 Transcripción previa (PDF o TXT)",
-                            file_types=[".pdf", ".txt", ".md"],
-                            type="filepath",
-                        )
+                        p1_audio = gr.File(label="🎵 Archivo de audio", file_types=AUDIO_TYPES, type="filepath")
                         p1_title = gr.Textbox(
-                            label="Título o tema del seminario",
-                            value="Seminario de Investigación",
-                            placeholder="Ej: Procesos Electroquímicos aplicados al tratamiento de aguas",
+                            label="Nombre o tema de la clase / seminario (Da nombre a la carpeta)",
+                            value="Clase de Investigación",
+                            placeholder="Ej: Termodinámica Estadística - Clase 4",
                         )
-                        p1_context_text = gr.Textbox(
-                            label="📧 Contexto adicional: Correo de anuncio, abstract o notas previas",
-                            lines=4,
-                            placeholder="Pega aquí el correo donde anunciaron el seminario, el nombre y laboratorio del ponente, el abstract o el temario...",
-                        )
-                        p1_context_files = gr.File(
-                            label="📚 Archivos de apoyo opcionales (PDFs de artículos, diapositivas, capítulos)",
-                            file_count="multiple",
-                            file_types=[".pdf", ".txt"],
-                            type="filepath",
-                        )
-
-                        p1_model = gr.Radio(
+                        p1_doc_type = gr.Radio(
                             [
-                                ("🧠 Modelo Local en GPU Colab (Qwen 2.5 3B - Recomendado en A100/L4: 100% autónomo, sin claves ni límites)", "Local"),
-                                ("⚡ Groq Cloud (Llama 3.3 70B - Ultrarrápido, usa tu GROQ_API_KEY)", "Groq"),
-                                ("🌐 Google Gemini 3.8 Flash (Requiere GEMINI_API_KEY)", "Gemini"),
+                                ("📖 Cuaderno de Apuntes de Clase (Fórmulas, conceptos, lo que el profesor enfatizó, glosario y autoevaluación)", "class_notes"),
+                                ("🎓 Informe Ejecutivo de Seminario (Ficha técnica, reconstrucción cronológica, resumen y Q&A)", "seminar"),
+                                ("🌟 Híbrido Integral (Ambos combinados: informe + apuntes de estudio completos)", "hybrid"),
                             ],
-                            value="Local",
-                            label="Motor de Inteligencia Artificial para el Informe",
-                            info="En Colab Pro con GPU A100 o L4, el Modelo Local analiza el seminario en ~15 segundos con total autonomía y sin problemas de cuotas de API.",
-                        )
-                        p1_api_key = gr.Textbox(
-                            label="API Key (Opcional: SOLO si eliges Groq o Gemini)",
-                            type="password",
-                            placeholder="NO necesaria para el Modelo Local en GPU",
+                            value="class_notes",
+                            label="Tipo de documento académico a generar",
+                            info="Selecciona 'Apuntes de Clase' para explicaciones didácticas paso a paso, fórmulas desglosadas y cuestionario tipo examen.",
                         )
 
-                        p1_btn = gr.Button(
-                            "🚀 Reconstruir Seminario y Generar Informe",
-                            variant="primary",
-                            size="lg",
-                        )
-
-                    with gr.Column(scale=5):
-                        p1_status = gr.Markdown()
-                        with gr.Row():
-                            p1_pdf_out = gr.File(label="📄 Descargar Informe Reconstruido (PDF)")
-                            p1_md_out = gr.File(label="📝 Descargar Informe en Markdown (.md)")
-                        p1_preview = gr.Markdown(label="Vista previa del informe")
-
-                p1_btn.click(
-                    run_reconstruction_from_file,
-                    inputs=[
-                        p1_file,
-                        p1_context_text,
-                        p1_context_files,
-                        p1_title,
-                        p1_model,
-                        p1_api_key,
-                    ],
-                    outputs=[p1_pdf_out, p1_md_out, p1_preview, p1_status],
-                )
-
-            # ===============================================================
-            # PESTAÑA 2: FLUJO COMPLETO DESDE AUDIO
-            # ===============================================================
-            with gr.Tab("🎙️ Flujo Completo: Audio -> Transcripción + Reconstrucción"):
-                gr.Markdown(
-                    "### Transcripción de Audio en GPU T4 con Análisis Posterior Opcional\n"
-                    "Sube un archivo de audio (en inglés, español u otro idioma). "
-                    "Whisper transcribirá el audio en GPU, y si lo deseas, generará de inmediato el informe reconstruido."
-                )
-                with gr.Row():
-                    with gr.Column(scale=5):
-                        p2_audio = gr.File(label="Archivo de audio", file_types=AUDIO_TYPES, type="filepath")
-                        p2_title = gr.Textbox(label="Título del documento", value="Transcripción de seminario")
-
-                        p2_target_mode = gr.Radio(
+                        p1_target_mode = gr.Radio(
                             [
-                                ("Traducir al español 🇲🇽/🇪🇸 (Ideal para audios en inglés)", "to_es"),
+                                ("Traducir al español 🇲🇽/🇪🇸 (Ideal para clases o charlas en inglés)", "to_es"),
                                 ("Mantener idioma original (sin traducción)", "original"),
                                 ("Traducir a inglés 🇺🇸 (Whisper nativo)", "to_en"),
                             ],
@@ -1059,7 +1091,7 @@ def build_ui():
                             label="Idioma de la transcripción",
                         )
 
-                        p2_audio_lang = gr.Dropdown(
+                        p1_audio_lang = gr.Dropdown(
                             [
                                 ("Detectar automáticamente", "auto"),
                                 ("English (Inglés)", "en"),
@@ -1071,84 +1103,170 @@ def build_ui():
                             label="Idioma hablado en el audio",
                         )
 
-                        p2_reconstruct_check = gr.Checkbox(
-                            label="Generar también Reconstrucción e Informe Ejecutivo con IA",
+                        p1_reconstruct_check = gr.Checkbox(
+                            label="Generar Apuntes / Informe Académico con IA",
                             value=True,
-                            info="Combina la transcripción con el contexto para llenar vacíos, crear resumen y analizar Q&A.",
+                            info="Combina la transcripción con el contexto para llenar vacíos, explicar conceptos y armar la guía.",
                         )
 
-                        p2_context_text = gr.Textbox(
-                            label="📧 Contexto adicional (Correo de anuncio, abstract o notas)",
+                        p1_context_text = gr.Textbox(
+                            label="📧 Contexto adicional (Temario, abstract, correo de anuncio o notas del curso)",
                             lines=3,
-                            placeholder="Pega aquí el correo de invitación, abstract o tema...",
+                            placeholder="Pega aquí el temario de la clase, correo de invitación, abstract o tema clave...",
                         )
-                        p2_context_files = gr.File(
-                            label="📚 Archivos de apoyo (PDFs de artículos, diapositivas)",
+                        p1_context_files = gr.File(
+                            label="📚 Archivos de apoyo opcionales (Diapositivas, artículos, capítulos)",
                             file_count="multiple",
                             file_types=[".pdf", ".txt"],
                             type="filepath",
                         )
 
                         with gr.Accordion("⚙️ Opciones avanzadas de Whisper e IA", open=False):
-                            p2_whisper_model = gr.Dropdown(
+                            p1_whisper_model = gr.Dropdown(
                                 ["small", "medium", "large-v3"],
                                 value="medium",
                                 label="Modelo Whisper",
                             )
-                            p2_llm_model = gr.Radio(
+                            p1_llm_model = gr.Radio(
                                 [
-                                    ("🧠 Modelo Local en GPU Colab (Qwen 2.5 3B - Recomendado en A100/L4)", "Local"),
+                                    ("🧠 Modelo Local en GPU Colab (Qwen 2.5 3B - Recomendado en A100/L4: 100% autónomo)", "Local"),
                                     ("⚡ Groq Cloud (Llama 3.3 70B)", "Groq"),
                                     ("🌐 Google Gemini 3.8 Flash", "Gemini"),
                                 ],
                                 value="Local",
-                                label="Modelo para Reconstrucción",
+                                label="Motor de IA para Apuntes / Informe",
                             )
-                            p2_api_key = gr.Textbox(
+                            p1_api_key = gr.Textbox(
                                 label="API Key de Gemini / Groq (opcional)",
                                 type="password",
                             )
 
-                        p2_btn = gr.Button("Transcribir y Procesar", variant="primary", size="lg")
+                        p1_btn = gr.Button("🚀 Iniciar Transcripción y Generar Documentos", variant="primary", size="lg")
+
+                    with gr.Column(scale=5):
+                        p1_status = gr.Markdown()
+                        gr.Markdown("#### Archivos de Transcripción:")
+                        with gr.Row():
+                            p1_pdf_trans = gr.File(label="📄 PDF Transcripción (Línea por línea)")
+                            p1_txt_trans = gr.File(label="📝 TXT Transcripción")
+                        p1_orig_txt = gr.File(label="🗂️ TXT Original en inglés (Respaldo)")
+
+                        gr.Markdown("#### Apuntes / Informe Académico Generado:")
+                        with gr.Row():
+                            p1_pdf_analysis = gr.File(label="📄 PDF Apuntes / Informe")
+                            p1_md_analysis = gr.File(label="📝 Markdown (.md)")
+
+                        p1_preview = gr.Textbox(label="Vista previa del texto", lines=10, interactive=False)
+
+                p1_btn.click(
+                    transcribe_pipeline,
+                    inputs=[
+                        p1_audio,
+                        p1_title,
+                        p1_doc_type,
+                        p1_audio_lang,
+                        p1_target_mode,
+                        p1_whisper_model,
+                        p1_reconstruct_check,
+                        p1_context_text,
+                        p1_context_files,
+                        p1_llm_model,
+                        p1_api_key,
+                    ],
+                    outputs=[
+                        p1_pdf_trans,
+                        p1_txt_trans,
+                        p1_orig_txt,
+                        p1_pdf_analysis,
+                        p1_md_analysis,
+                        p1_preview,
+                        p1_status,
+                    ],
+                )
+
+            # ===============================================================
+            # PESTAÑA 2: POST-PROCESAR TRANSCRIPCIÓN PREVIA
+            # ===============================================================
+            with gr.Tab("📑 Post-procesar Transcripción Previa (PDF o TXT)"):
+                gr.Markdown(
+                    "### Generación de Apuntes e Informes desde una Transcripción Existente\n"
+                    "Sube el **PDF o TXT que ya generaste** (sin necesidad de volver a procesar el audio). "
+                    "La IA reconstruirá el contenido faltante o dañado por cortes, subsanará inicios incompletos y generará tus apuntes o informe en su propia carpeta."
+                )
+                with gr.Row():
+                    with gr.Column(scale=5):
+                        p2_file = gr.File(
+                            label="📄 Transcripción previa (PDF o TXT)",
+                            file_types=[".pdf", ".txt", ".md"],
+                            type="filepath",
+                        )
+                        p2_title = gr.Textbox(
+                            label="Nombre o tema de la clase / seminario (Da nombre a la carpeta)",
+                            value="Seminario de Investigación",
+                            placeholder="Ej: Procesos Electroquímicos aplicados al tratamiento de aguas",
+                        )
+                        p2_doc_type = gr.Radio(
+                            [
+                                ("📖 Cuaderno de Apuntes de Clase (Fórmulas, conceptos, advertencias de examen, glosario y autoevaluación)", "class_notes"),
+                                ("🎓 Informe Ejecutivo de Seminario (Ficha técnica, reconstrucción cronológica, resumen y Q&A)", "seminar"),
+                                ("🌟 Híbrido Integral (Ambos combinados: informe + apuntes de estudio completos)", "hybrid"),
+                            ],
+                            value="class_notes",
+                            label="Tipo de documento académico a generar",
+                        )
+                        p2_context_text = gr.Textbox(
+                            label="📧 Contexto adicional: Correo de anuncio, temario, abstract o notas previas",
+                            lines=4,
+                            placeholder="Pega aquí el temario, el correo donde anunciaron el evento, nombre del profesor/ponente, etc...",
+                        )
+                        p2_context_files = gr.File(
+                            label="📚 Archivos de apoyo opcionales (Diapositivas, artículos, capítulos)",
+                            file_count="multiple",
+                            file_types=[".pdf", ".txt"],
+                            type="filepath",
+                        )
+
+                        p2_model = gr.Radio(
+                            [
+                                ("🧠 Modelo Local en GPU Colab (Qwen 2.5 3B - Recomendado en A100/L4: 100% autónomo)", "Local"),
+                                ("⚡ Groq Cloud (Llama 3.3 70B - Ultrarrápido, usa tu GROQ_API_KEY)", "Groq"),
+                                ("🌐 Google Gemini 3.8 Flash (Requiere GEMINI_API_KEY)", "Gemini"),
+                            ],
+                            value="Local",
+                            label="Motor de Inteligencia Artificial",
+                            info="En Colab Pro con GPU A100 o L4, el Modelo Local analiza todo en ~15 segundos en tu GPU.",
+                        )
+                        p2_api_key = gr.Textbox(
+                            label="API Key (Opcional: SOLO si eliges Groq o Gemini)",
+                            type="password",
+                            placeholder="NO necesaria para el Modelo Local en GPU",
+                        )
+
+                        p2_btn = gr.Button(
+                            "🚀 Reconstruir Contenido y Generar Documentos",
+                            variant="primary",
+                            size="lg",
+                        )
 
                     with gr.Column(scale=5):
                         p2_status = gr.Markdown()
-                        gr.Markdown("#### Archivos de Transcripción:")
                         with gr.Row():
-                            p2_pdf_trans = gr.File(label="📄 PDF Transcripción (Línea por línea)")
-                            p2_txt_trans = gr.File(label="📝 TXT Transcripción")
-                        p2_orig_txt = gr.File(label="🗂️ TXT Original en inglés (Respaldo)")
-
-                        gr.Markdown("#### Informe Ejecutivo Reconstruido:")
-                        with gr.Row():
-                            p2_pdf_analysis = gr.File(label="📄 PDF Informe Reconstruido")
-                            p2_md_analysis = gr.File(label="📝 Markdown Informe Reconstruido")
-
-                        p2_preview = gr.Textbox(label="Vista previa del texto", lines=10, interactive=False)
+                            p2_pdf_out = gr.File(label="📄 Descargar Apuntes / Informe (PDF)")
+                            p2_md_out = gr.File(label="📝 Descargar en Markdown (.md)")
+                        p2_preview = gr.Markdown(label="Vista previa del documento")
 
                 p2_btn.click(
-                    transcribe_pipeline,
+                    run_reconstruction_from_file,
                     inputs=[
-                        p2_audio,
-                        p2_title,
-                        p2_audio_lang,
-                        p2_target_mode,
-                        p2_whisper_model,
-                        p2_reconstruct_check,
+                        p2_file,
                         p2_context_text,
                         p2_context_files,
-                        p2_llm_model,
+                        p2_title,
+                        p2_doc_type,
+                        p2_model,
                         p2_api_key,
                     ],
-                    outputs=[
-                        p2_pdf_trans,
-                        p2_txt_trans,
-                        p2_orig_txt,
-                        p2_pdf_analysis,
-                        p2_md_analysis,
-                        p2_preview,
-                        p2_status,
-                    ],
+                    outputs=[p2_pdf_out, p2_md_out, p2_preview, p2_status],
                 )
 
     return demo
